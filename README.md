@@ -33,7 +33,28 @@ dashboard and the file stay in sync (saving from the GUI rewrites the file).
 
 The dashboard's **Activity** card shows what's happening live: which channel is
 being checked, per-video download progress (percent + ETA from yt-dlp), muting
-progress, and a running log of everything the server does.
+progress, and a running log of everything the server does. While a check is
+running, the **Check now** button becomes **Stop** — it kills the current
+download/mute and ends the check; anything unfinished is retried next cycle.
+
+## YouTube bot checks (cookies)
+
+If the Activity log shows `Sign in to confirm you're not a bot`, YouTube is
+blocking anonymous downloads from your IP. Fix: give yt-dlp cookies from a
+signed-in YouTube session.
+
+1. In a browser signed in to YouTube (a throwaway Google account is strongly
+   recommended — heavy downloading can get an account flagged), install a
+   cookies exporter such as **Get cookies.txt LOCALLY**.
+2. Export cookies for `youtube.com` in Netscape format. Tip from the yt-dlp
+   FAQ: open a private/incognito window, sign in, export from there, then close
+   the window — that keeps YouTube from rotating the exported cookies.
+3. Save the file as **`config/cookies.txt`** (next to `config.yaml`).
+
+That's it — Hushcut checks for the file on every sync and passes it to yt-dlp
+automatically (a green **cookies** pill appears on the dashboard). Requests are
+also spaced out (`--sleep-requests 1`) to stay under the radar. More detail:
+[yt-dlp FAQ on cookies](https://github.com/yt-dlp/yt-dlp/wiki/FAQ#how-do-i-pass-cookies-to-yt-dlp).
 
 ## Updating
 

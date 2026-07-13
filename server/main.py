@@ -63,6 +63,17 @@ ACTIVITY = []
 
 CONFIG_LOCK = threading.Lock()
 WAKE = threading.Event()  # set by POST /check (and after config save) to skip the sleep
+STOP = threading.Event()  # set by POST /stop to abort the running check
+
+# the subprocess currently doing work (yt-dlp or ffmpeg), so /stop can kill it
+PROC_LOCK = threading.Lock()
+CUR_PROC = None
+
+
+def set_proc(p):
+    global CUR_PROC
+    with PROC_LOCK:
+        CUR_PROC = p
 
 DEFAULT_SETTINGS = {
     'check_interval_minutes': 360,
@@ -87,6 +98,13 @@ def log(*args):
 def set_current(text):
     with STATE_LOCK:
         STATE['current'] = text
+
+
+def cookies_path():
+    """Optional Netscape-format cookies.txt next to config.yaml — passed to
+    yt-dlp to get past YouTube's 'Sign in to confirm you're not a bot' check."""
+    p = os.path.join(os.path.dirname(CONFIG_PATH) or '.', 'cookies.txt')
+    return p if os.path.exists(p) else None
 
 
 def ensure_dirs():
@@ -315,7 +333,19 @@ def mute_video(src, dst, intervals):
         "volume=enable='between(t,%.3f,%.3f)':volume=0" % (a, b) for a, b in intervals)
     cmd = ['ffmpeg', '-y', '-hide_banner', '-loglevel', 'error', '-i', src,
            '-c:v', 'copy', '-af', filters, '-c:a', 'aac', '-b:a', '192k', dst]
-    subprocess.run(cmd, check=True)
+    p = subprocess.Popen(cmd)
+    set_proc(p)
+    try:
+        rc = p.wait()
+    finally:
+        set_proc(None)
+    if rc != 0:
+        # never leave a partial output behind — it would be seen as done
+        try:
+            os.remove(dst)
+        except OSError:
+            pass
+        raise RuntimeError('ffmpeg exited with code %d' % rc)
 
 
 def sync_channel(ch, cfg):
@@ -330,19 +360,25 @@ def sync_channel(ch, cfg):
            '--write-subs', '--write-auto-subs', '--sub-langs', st.get('sub_langs', 'en.*'),
            '--download-archive', os.path.join(DATA, 'state', 'archive.txt'),
            '--lazy-playlist', '--newline', '--ignore-errors',
+           '--sleep-requests', '1',
            '-o', os.path.join(outdir, '%(title).150B [%(id)s].%(ext)s')]
+    cookies = cookies_path()
+    if cookies:
+        cmd += ['--cookies', cookies]
     if frm:
         cmd += ['--dateafter', frm,
                 '--break-match-filters', 'upload_date >= %s' % frm]
     if to:
         cmd += ['--datebefore', to]
     cmd.append(str(ch['url']))
-    log('sync: %s (window %s → %s)' % (name, frm or 'any', to or 'any'))
+    log('sync: %s (window %s → %s)%s' % (
+        name, frm or 'any', to or 'any', ' [cookies]' if cookies else ''))
     set_current('%s — checking for new videos' % name)
-    seen, cur_title = set(), None
+    seen, cur_title, hinted = set(), None, False
     try:
         p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                              text=True, errors='replace')
+        set_proc(p)
         watchdog = threading.Timer(3 * 3600, p.kill)
         watchdog.start()
         try:
@@ -367,11 +403,20 @@ def sync_channel(ch, cfg):
                     set_current('%s — %s' % (name, line.replace('[download] ', '')))
                 elif line.startswith('ERROR'):
                     log('  ', line[:200])
+                    if 'Sign in to confirm' in line and not hinted:
+                        hinted = True
+                        log('hint: YouTube bot check — put a cookies.txt exported '
+                            'from a signed-in browser into the config folder '
+                            '(see README, "YouTube bot checks")')
             p.wait(timeout=300)
         finally:
             watchdog.cancel()
-        log('sync done: %s — %s' % (
-            name, '%d new video(s)' % len(seen) if seen else 'nothing new'))
+            set_proc(None)
+        if STOP.is_set():
+            log('sync stopped: %s' % name)
+        else:
+            log('sync done: %s — %s' % (
+                name, '%d new video(s)' % len(seen) if seen else 'nothing new'))
     except Exception as e:  # noqa: BLE001
         log('sync error:', name, e)
     finally:
@@ -395,6 +440,8 @@ def process_incoming(cfg):
 
     for root, _dirs, files in os.walk(os.path.join(DATA, 'incoming')):
         for fname in sorted(files):
+            if STOP.is_set():
+                return
             if not fname.lower().endswith(VIDEO_EXTS):
                 continue
             src = os.path.join(root, fname)
@@ -442,9 +489,13 @@ def process_incoming(cfg):
                 log('processed:', base, '-', entry['words'], 'words,',
                     entry['seconds'], 's silenced')
             except Exception as e:  # noqa: BLE001
-                entry['status'] = 'error'
-                entry['note'] = str(e)[:300]
-                log('process error:', base, e)
+                if STOP.is_set():
+                    entry['status'] = 'skipped'
+                    entry['note'] = 'stopped — will retry next check'
+                else:
+                    entry['status'] = 'error'
+                    entry['note'] = str(e)[:300]
+                    log('process error:', base, e)
             push_recent(entry)
 
 
@@ -517,8 +568,11 @@ label.chk input{width:auto}
 @media(max-width:700px){.chrow{grid-template-columns:1fr 1fr}}
 </style></head><body>
 <div class="bar"><div class="glyph">H</div><h1>Hushcut Server</h1>
-<span id="busy" class="pill">idle</span><span style="flex:1"></span><span id="next" class="n"></span>
-<button id="checknow" class="btn ghost" type="button" style="height:30px;padding:0 12px">Check now</button></div>
+<span id="busy" class="pill">idle</span>
+<span id="ck" class="pill" title="config/cookies.txt found — passed to yt-dlp" style="display:none;background:#e8f4ea;color:#2f9e44">cookies</span>
+<span style="flex:1"></span><span id="next" class="n"></span>
+<button id="checknow" class="btn ghost" type="button" style="height:30px;padding:0 12px">Check now</button>
+<button id="stopbtn" class="btn ghost" type="button" style="display:none;height:30px;padding:0 12px;color:#b3261e">Stop</button></div>
 <div class="wrap">
 <div class="card"><h2>Activity</h2>
 <div id="cur" class="curline idle">Loading&hellip;</div>
@@ -614,11 +668,18 @@ $('checknow').onclick=function(){
  fetch('/check',{method:'POST'}).then(function(){msg('Check queued.',true);tick()})
  .catch(function(){msg('request failed',false)});
 };
+$('stopbtn').onclick=function(){
+ fetch('/stop',{method:'POST'}).then(function(){msg('Stopping\\u2026',true);tick()})
+ .catch(function(){msg('request failed',false)});
+};
 function tick(){
  fetch('/status').then(function(r){return r.json()}).then(function(s){
   var busy=$('busy');
   busy.textContent=s.busy?'checking\\u2026':'idle';
   busy.className='pill'+(s.busy?' busy':'');
+  $('ck').style.display=s.cookies?'':'none';
+  $('checknow').style.display=s.busy?'none':'';
+  $('stopbtn').style.display=s.busy?'':'none';
   $('next').textContent=s.next_check?('next check '+fmt(s.next_check)):'';
   var cur=$('cur');
   if(s.current){cur.textContent=s.current;cur.className='curline'}
@@ -663,6 +724,7 @@ class Handler(BaseHTTPRequestHandler):
                     'busy': STATE['busy'], 'next_check': STATE['next_check'],
                     'started': STATE['started'], 'channels': STATE['channels'],
                     'current': STATE['current'], 'activity': activity,
+                    'cookies': bool(cookies_path()),
                     'recent': STATE['recent'][:100],
                 }).encode()
             return self._send(200, 'application/json', body)
@@ -703,6 +765,13 @@ class Handler(BaseHTTPRequestHandler):
         if p == '/check':
             WAKE.set()
             return self._json(200, {'ok': True})
+        if p == '/stop':
+            STOP.set()
+            with PROC_LOCK:
+                if CUR_PROC is not None and CUR_PROC.poll() is None:
+                    CUR_PROC.kill()
+            log('stop requested from dashboard')
+            return self._json(200, {'ok': True})
         return self._send(404, 'application/json', b'{"error":"not found"}')
 
     def log_message(self, *args):
@@ -720,6 +789,7 @@ def main():
 
     while True:
         WAKE.clear()
+        STOP.clear()
         try:
             cfg = load_config()
         except Exception as e:  # noqa: BLE001
@@ -733,9 +803,14 @@ def main():
                 for c in cfg['channels']]
             STATE['busy'] = True
         for ch in cfg['channels']:
+            if STOP.is_set():
+                break
             if ch.get('url'):
                 sync_channel(ch, cfg)
-        process_incoming(cfg)
+        if not STOP.is_set():
+            process_incoming(cfg)
+        if STOP.is_set():
+            log('check stopped — anything unfinished is retried next check')
         set_current(None)
         interval = max(5, int(cfg['settings'].get('check_interval_minutes', 360)))
         with STATE_LOCK:
