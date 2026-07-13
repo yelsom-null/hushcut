@@ -1,0 +1,12 @@
+services:
+  hushcut:
+    build: .
+    container_name: hushcut
+    restart: unless-stopped
+    ports:
+      - "8788:8788"
+    volumes:
+      - ./config:/config
+      - ./data:/data
+    environment:
+      - TZ=America/New_York

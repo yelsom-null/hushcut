@@ -1,0 +1,20 @@
+settings:
+  check_interval_minutes: 360    # how often to check channels (minutes)
+  keep_original: false           # keep unmuted originals in data/originals
+  mute_lead: 0.4                 # seconds of silence before each flagged word
+  mute_tail: 0.3                 # seconds of silence after each flagged word
+  sub_langs: "en.*"              # subtitle languages to fetch
+  quality: "bv*[height<=1080][ext=mp4]+ba[ext=m4a]/b[ext=mp4]/b"
+  on_missing_subs: copy          # copy | skip — what to do when a video has no subtitles
+  extra_words: []                # custom filter words/phrases, e.g. ["frick", "shut up"]
+
+channels:
+  # Use the channel's /videos URL. Date windows filter by upload date.
+  - name: "Example Channel"
+    url: "https://www.youtube.com/@example/videos"
+    from: "2026-07"              # month shorthand: only videos from July 2026
+
+  # - name: "Another Channel"
+  #   url: "https://www.youtube.com/@another/videos"
+  #   from: "2026-07-01"
+  #   to: "2026-07-31"
