@@ -41,10 +41,9 @@ progress, and a running log of everything the server does.
 ./tools/update.sh
 ```
 
-That pulls the latest commit and applies it: server code is bind-mounted into
-the container, so normal updates are just a container restart; the image is
-rebuilt automatically when `Dockerfile`/`docker-compose.yml` changed. For
-hands-off updates, run it from cron:
+That pulls the latest commit and rebuilds the container. Docker's layer cache
+makes code-only updates take just a few seconds; it's also safe to run any time
+to make sure the container is up. For hands-off updates, run it from cron:
 
 ```cron
 0 4 * * * cd /path/to/hushcut && ./tools/update.sh >> data/update.log 2>&1
@@ -85,9 +84,18 @@ immediately.
 - `server/main.py` — the scheduler + downloader + muting pipeline + dashboard
 - `docker-compose.yml`, `Dockerfile` — container setup (ffmpeg, yt-dlp, deno included)
 - `config/config.example.yaml` — starter config
-- `tools/update.sh` — pull the latest commit and restart/rebuild the container
+- `tools/update.sh` — pull the latest commit and rebuild/restart the container
 - `tools/hushcut-helper.py` — local helper for the interactive Hushcut review app
   (paste a URL in the app, preview mutes word-by-word, export a muted copy)
+
+## Troubleshooting
+
+- **Container won't start / keeps restarting:** `docker compose logs --tail 50`
+  shows the reason.
+- **"container name \"/hushcut\" is already in use"** (happens after re-cloning
+  or renaming the repo folder): `docker rm -f hushcut`, then
+  `docker compose up -d --build`.
+- **Clean rebuild:** `docker compose down && docker compose up -d --build`.
 
 ## Notes & caveats
 
