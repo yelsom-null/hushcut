@@ -6,7 +6,8 @@ date windows you set** — and mute the cursing before they hit your library.
 Under the hood: `yt-dlp` fetches new videos + subtitles on a schedule, Hushcut scans
 the subtitles for profanity (including YouTube's censored `[ __ ]` auto-caption
 marker and your own custom words), and `ffmpeg` silences each hit (video stream is
-copied, not re-encoded). A small status dashboard runs on port **8788**.
+copied, not re-encoded). A dashboard on port **8788** shows status and lets you
+manage channels and settings right from the browser.
 
 ```
 ┌─────────────┐   schedule   ┌──────────┐   subtitles   ┌────────┐
@@ -18,15 +19,21 @@ copied, not re-encoded). A small status dashboard runs on port **8788**.
 ## Quick start (Docker)
 
 ```bash
-cp config/config.example.yaml config/config.yaml
-# edit config/config.yaml — add your channels + date windows
 docker compose up -d --build
 ```
 
-Open **http://localhost:8788** for the dashboard. Clean files land in
+Open **http://localhost:8788**, add your channels + date windows in the
+**Channels** card, tweak the **Settings** card, hit **Save config**, then
+**Check now** (or wait for the schedule). Clean files land in
 `data/clean/<channel>/… (clean).mp4`.
 
+A default `config/config.yaml` is created on first run. Prefer editing YAML by
+hand? Copy `config/config.example.yaml` to `config/config.yaml` instead — the
+dashboard and the file stay in sync (saving from the GUI rewrites the file).
+
 ## Configuration (`config/config.yaml`)
+
+Everything below can be set from the dashboard; the YAML is the source of truth.
 
 ```yaml
 settings:
@@ -50,7 +57,9 @@ channels:
 ```
 
 Date windows use the video **upload date**. Omit `from`/`to` to take everything.
-Config is re-read every cycle — edit it any time without restarting.
+Config is re-read every cycle — edit it any time (GUI or file) without
+restarting; use the dashboard's **Check now** button to apply changes
+immediately.
 
 ## What's in this repo
 
@@ -71,3 +80,6 @@ Config is re-read every cycle — edit it any time without restarting.
 - Be polite: long check intervals (6–24 h) keep YouTube from throttling you.
 - The Dockerfile installs `deno` for yt-dlp's YouTube extractor (x86_64 build —
   swap the download URL for `aarch64` on ARM/Raspberry Pi).
+- The dashboard has no authentication, and saving config is a write operation —
+  keep port 8788 on your home LAN (or bind it to `127.0.0.1:8788:8788` in
+  `docker-compose.yml`); don't expose it to the internet.

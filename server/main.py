@@ -6,7 +6,8 @@ each channel's date window (yt-dlp), scans their subtitles for profanity
 (built-in list + YouTube's censored "[ __ ]" marker + custom words), silences
 each hit with ffmpeg (video stream copied), and serves a status dashboard.
 
-Config:  /config/config.yaml   (see config.example.yaml)
+Config:  /config/config.yaml   (see config.example.yaml — also editable from
+         the dashboard, which writes this file)
 Data:    /data/{incoming,clean,originals,state}
 Web:     http://localhost:8788
 """
@@ -54,6 +55,20 @@ STATE = {
     'started': datetime.now(timezone.utc).isoformat(),
 }
 
+CONFIG_LOCK = threading.Lock()
+WAKE = threading.Event()  # set by POST /check (and after config save) to skip the sleep
+
+DEFAULT_SETTINGS = {
+    'check_interval_minutes': 360,
+    'keep_original': False,
+    'mute_lead': 0.4,
+    'mute_tail': 0.3,
+    'sub_langs': 'en.*',
+    'quality': 'bv*[height<=1080][ext=mp4]+ba[ext=m4a]/b[ext=mp4]/b',
+    'on_missing_subs': 'copy',
+    'extra_words': [],
+}
+
 
 def log(*args):
     print('[hushcut]', *args, flush=True)
@@ -65,11 +80,87 @@ def ensure_dirs():
 
 
 def load_config():
-    with open(CONFIG_PATH, encoding='utf-8') as f:
-        cfg = yaml.safe_load(f) or {}
+    with CONFIG_LOCK:
+        with open(CONFIG_PATH, encoding='utf-8') as f:
+            cfg = yaml.safe_load(f) or {}
     cfg.setdefault('settings', {})
     cfg.setdefault('channels', [])
     return cfg
+
+
+def save_config(cfg):
+    with CONFIG_LOCK:
+        os.makedirs(os.path.dirname(CONFIG_PATH) or '.', exist_ok=True)
+        tmp = CONFIG_PATH + '.tmp'
+        with open(tmp, 'w', encoding='utf-8') as f:
+            yaml.safe_dump(cfg, f, sort_keys=False, default_flow_style=False,
+                           allow_unicode=True)
+        os.replace(tmp, CONFIG_PATH)
+
+
+def ensure_config():
+    if not os.path.exists(CONFIG_PATH):
+        save_config({'settings': dict(DEFAULT_SETTINGS), 'channels': []})
+        log('created default config at', CONFIG_PATH,
+            '— add channels from the dashboard')
+
+
+def clean_config(data):
+    """Validate a config submitted from the dashboard. Returns a clean dict
+    ready for save_config, or raises ValueError with a user-facing message."""
+    if not isinstance(data, dict):
+        raise ValueError('config must be an object')
+    s_in = data.get('settings') or {}
+    if not isinstance(s_in, dict):
+        raise ValueError('settings must be an object')
+    s = {}
+    try:
+        s['check_interval_minutes'] = max(5, int(s_in.get('check_interval_minutes', 360)))
+        s['mute_lead'] = min(5.0, max(0.0, float(s_in.get('mute_lead', 0.4))))
+        s['mute_tail'] = min(5.0, max(0.0, float(s_in.get('mute_tail', 0.3))))
+    except (TypeError, ValueError):
+        raise ValueError('check interval, mute lead and mute tail must be numbers') from None
+    s['keep_original'] = bool(s_in.get('keep_original'))
+    s['sub_langs'] = str(s_in.get('sub_langs') or DEFAULT_SETTINGS['sub_langs']).strip()
+    s['quality'] = str(s_in.get('quality') or DEFAULT_SETTINGS['quality']).strip()
+    s['on_missing_subs'] = str(s_in.get('on_missing_subs') or 'copy')
+    if s['on_missing_subs'] not in ('copy', 'skip'):
+        raise ValueError("on_missing_subs must be 'copy' or 'skip'")
+    words = s_in.get('extra_words') or []
+    if not isinstance(words, list):
+        raise ValueError('extra_words must be a list')
+    s['extra_words'] = [str(w).strip() for w in words if str(w).strip()]
+
+    chans_in = data.get('channels') or []
+    if not isinstance(chans_in, list):
+        raise ValueError('channels must be a list')
+    chans = []
+    for i, c in enumerate(chans_in):
+        if not isinstance(c, dict):
+            raise ValueError('channel %d must be an object' % (i + 1))
+        url = str(c.get('url') or '').strip()
+        if not re.match(r'https?://', url):
+            raise ValueError('channel %d needs an http(s) URL' % (i + 1))
+        ch = {'name': str(c.get('name') or '').strip() or url, 'url': url}
+        for key in ('from', 'to'):
+            v = str(c.get(key) or '').strip()
+            if not v:
+                continue
+            m = re.fullmatch(r'(\d{4})-(\d{2})(?:-(\d{2}))?', v)
+            if not m or not 1 <= int(m.group(2)) <= 12 \
+                    or (m.group(3) and not 1 <= int(m.group(3)) <= 31):
+                raise ValueError(
+                    "channel %d: '%s' must be YYYY-MM or YYYY-MM-DD" % (i + 1, key))
+            ch[key] = v
+        # month shorthand: a bare "to" month means through its last day, and a
+        # bare "from" month paired with a "to" means from its first day
+        # (from-month with no "to" keeps the single-month meaning, see date_window)
+        if ch.get('to') and re.fullmatch(r'\d{4}-\d{2}', ch['to']):
+            ch['to'] = month_bounds(ch['to'])[1]
+        if ch.get('from') and ch.get('to') and re.fullmatch(r'\d{4}-\d{2}', ch['from']):
+            ch['from'] = month_bounds(ch['from'])[0]
+        chans.append(ch)
+    return {'settings': s, 'channels': chans}
 
 
 # ── date windows ─────────────────────────────────────────────
@@ -348,8 +439,6 @@ h1{font-size:14px;margin:0}
 .wrap{max-width:980px;margin:20px auto;padding:0 20px;display:flex;flex-direction:column;gap:14px}
 .card{background:#fff;border:1px solid rgba(0,0,0,.08);border-radius:10px;padding:14px 16px}
 .card h2{font-size:11px;margin:0 0 10px;text-transform:uppercase;letter-spacing:.05em;color:#86868b}
-.ch{display:inline-flex;gap:8px;align-items:baseline;background:#f6f5f3;border:1px solid rgba(0,0,0,.07);border-radius:7px;padding:6px 10px;margin:0 8px 8px 0;font-size:12.5px;font-weight:600}
-.ch small{font-weight:500;color:#6e6e73}
 table{width:100%;border-collapse:collapse;font-size:12.5px}
 th{text-align:left;font-size:10.5px;text-transform:uppercase;letter-spacing:.05em;color:#a1a09d;padding:6px 8px;border-bottom:1px solid rgba(0,0,0,.08)}
 td{padding:7px 8px;border-bottom:1px solid rgba(0,0,0,.05);vertical-align:top}
@@ -358,11 +447,43 @@ td{padding:7px 8px;border-bottom:1px solid rgba(0,0,0,.05);vertical-align:top}
 .ok{color:#2f9e44;font-weight:600}.warning{color:#8a5a12;font-weight:600}
 .error{color:#b3261e;font-weight:600}.skipped{color:#6e6e73}
 .empty{color:#a1a09d;font-size:12.5px;padding:8px}
+input,select,textarea{font:inherit;font-size:12.5px;color:#1d1d1f;background:#fff;border:1px solid #c9c8c5;border-radius:7px;padding:6px 9px;box-sizing:border-box;width:100%}
+input:focus,select:focus,textarea:focus{outline:none;border-color:#0a68d6}
+label{display:flex;flex-direction:column;gap:4px;font-size:10.5px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:#86868b}
+label.chk{flex-direction:row;align-items:center;gap:8px;text-transform:none;letter-spacing:0;font-size:12.5px;font-weight:600;color:#1d1d1f}
+label.chk input{width:auto}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px}
+.grid .full{grid-column:1/-1}
+.chrow{display:grid;grid-template-columns:1fr 1.6fr 118px 118px 30px;gap:8px;margin-bottom:8px;align-items:center}
+.btn{font:inherit;font-size:12.5px;font-weight:600;border:0;border-radius:7px;padding:7px 14px;background:#0a68d6;color:#fff;cursor:pointer}
+.btn:hover{background:#085bbd}
+.btn.ghost{background:#f6f5f3;color:#1d1d1f;border:1px solid rgba(0,0,0,.12)}
+.btn.ghost:hover{background:#ecebe9}
+.del{border:0;background:none;color:#b3261e;font-size:17px;cursor:pointer;padding:0 4px;line-height:1}
+.saverow{display:flex;align-items:center;gap:12px}
+#msg{font-size:12.5px;font-weight:600}
+#msg.good{color:#2f9e44}#msg.bad{color:#b3261e}
+@media(max-width:700px){.chrow{grid-template-columns:1fr 1fr}}
 </style></head><body>
 <div class="bar"><div class="glyph">H</div><h1>Hushcut Server</h1>
-<span id="busy" class="pill">idle</span><span style="flex:1"></span><span id="next" class="n"></span></div>
+<span id="busy" class="pill">idle</span><span style="flex:1"></span><span id="next" class="n"></span>
+<button id="checknow" class="btn ghost" type="button" style="height:30px;padding:0 12px">Check now</button></div>
 <div class="wrap">
-<div class="card"><h2>Channels</h2><div id="channels" class="empty">Loading&hellip;</div></div>
+<div class="card"><h2>Channels</h2>
+<div id="chrows" class="empty">Loading&hellip;</div>
+<button id="addch" class="btn ghost" type="button">+ Add channel</button></div>
+<div class="card"><h2>Settings</h2>
+<div class="grid">
+<label>Check interval (minutes)<input id="s_interval" type="number" min="5" step="1"></label>
+<label>Videos without subtitles<select id="s_missing"><option value="copy">copy through unmuted</option><option value="skip">skip</option></select></label>
+<label>Mute lead (seconds)<input id="s_lead" type="number" min="0" max="5" step="0.1"></label>
+<label>Mute tail (seconds)<input id="s_tail" type="number" min="0" max="5" step="0.1"></label>
+<label>Subtitle languages<input id="s_langs" placeholder="en.*"></label>
+<label class="chk"><input id="s_keep" type="checkbox">Keep unmuted originals</label>
+<label class="full">yt-dlp format (quality)<input id="s_quality"></label>
+<label class="full">Extra filter words &mdash; one per line<textarea id="s_words" rows="3" placeholder="frick&#10;shut up"></textarea></label>
+</div></div>
+<div class="saverow"><button id="save" class="btn" type="button">Save config</button><span id="msg"></span></div>
 <div class="card"><h2>Recent videos</h2><div style="overflow-x:auto">
 <table><thead><tr><th>When</th><th>Channel</th><th>Title</th><th>Flagged</th><th>Silenced</th><th>Status</th></tr></thead>
 <tbody id="rows"></tbody></table>
@@ -371,27 +492,88 @@ td{padding:7px 8px;border-bottom:1px solid rgba(0,0,0,.05);vertical-align:top}
 <script>
 function esc(s){return String(s==null?'':s).replace(/[&<>"]/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]})}
 function fmt(iso){if(!iso)return'';return new Date(iso).toLocaleString()}
+function $(id){return document.getElementById(id)}
+function msg(text,good){var m=$('msg');m.textContent=text;m.className=good?'good':'bad';
+ clearTimeout(msg._t);if(text)msg._t=setTimeout(function(){m.textContent=''},6000)}
+
+function chRow(c){
+ c=c||{};
+ return '<div class="chrow">'+
+  '<input class="c_name" placeholder="Name" value="'+esc(c.name)+'">'+
+  '<input class="c_url" placeholder="https://www.youtube.com/@channel/videos" value="'+esc(c.url)+'">'+
+  '<input class="c_from" placeholder="from YYYY-MM[-DD]" value="'+esc(c.from)+'">'+
+  '<input class="c_to" placeholder="to YYYY-MM[-DD]" value="'+esc(c.to)+'">'+
+  '<button class="del" type="button" title="Remove channel">\\u00d7</button></div>';
+}
+function renderConfig(cfg){
+ var s=cfg.settings||{};
+ $('s_interval').value=s.check_interval_minutes;
+ $('s_missing').value=s.on_missing_subs||'copy';
+ $('s_lead').value=s.mute_lead;
+ $('s_tail').value=s.mute_tail;
+ $('s_langs').value=s.sub_langs||'';
+ $('s_keep').checked=!!s.keep_original;
+ $('s_quality').value=s.quality||'';
+ $('s_words').value=(s.extra_words||[]).join('\\n');
+ var rows=$('chrows');rows.className='';
+ rows.innerHTML=(cfg.channels||[]).map(chRow).join('');
+}
+function loadConfig(){
+ fetch('/config').then(function(r){return r.json()}).then(renderConfig)
+ .catch(function(){msg('could not load config',false)});
+}
+function gather(){
+ var chans=[].map.call(document.querySelectorAll('#chrows .chrow'),function(r){
+  function v(cl){return r.querySelector(cl).value.trim()}
+  return {name:v('.c_name'),url:v('.c_url'),from:v('.c_from'),to:v('.c_to')};
+ }).filter(function(c){return c.name||c.url||c.from||c.to});
+ return {settings:{
+   check_interval_minutes:$('s_interval').value,
+   on_missing_subs:$('s_missing').value,
+   mute_lead:$('s_lead').value,
+   mute_tail:$('s_tail').value,
+   sub_langs:$('s_langs').value.trim(),
+   keep_original:$('s_keep').checked,
+   quality:$('s_quality').value.trim(),
+   extra_words:$('s_words').value.split('\\n').map(function(w){return w.trim()}).filter(Boolean)
+  },channels:chans};
+}
+$('addch').onclick=function(){
+ var rows=$('chrows');rows.className='';
+ rows.insertAdjacentHTML('beforeend',chRow());
+ rows.lastElementChild.querySelector('.c_url').focus();
+};
+$('chrows').addEventListener('click',function(e){
+ if(e.target.classList.contains('del'))e.target.closest('.chrow').remove();
+});
+$('save').onclick=function(){
+ fetch('/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(gather())})
+ .then(function(r){return r.json().then(function(j){return{ok:r.ok,j:j}})})
+ .then(function(x){
+  msg(x.ok?'Saved \\u2014 applies from the next check.':(x.j.error||'save failed'),x.ok);
+  if(x.ok)loadConfig();
+ })
+ .catch(function(){msg('save failed',false)});
+};
+$('checknow').onclick=function(){
+ fetch('/check',{method:'POST'}).then(function(){msg('Check queued.',true);tick()})
+ .catch(function(){msg('request failed',false)});
+};
 function tick(){
  fetch('/status').then(function(r){return r.json()}).then(function(s){
-  var busy=document.getElementById('busy');
+  var busy=$('busy');
   busy.textContent=s.busy?'checking\\u2026':'idle';
   busy.className='pill'+(s.busy?' busy':'');
-  document.getElementById('next').textContent=s.next_check?('next check '+fmt(s.next_check)):'';
-  var ch=document.getElementById('channels');
-  ch.className='';
-  ch.innerHTML=(s.channels||[]).map(function(c){
-   var w=c.from?(c.from+(c.to?(' \\u2192 '+c.to):' \\u2192')):'all dates';
-   return '<span class="ch">'+esc(c.name)+'<small>'+esc(w)+'</small></span>';
-  }).join('')||'<span class="empty">No channels configured \\u2014 edit config/config.yaml</span>';
-  document.getElementById('rows').innerHTML=(s.recent||[]).map(function(r){
+  $('next').textContent=s.next_check?('next check '+fmt(s.next_check)):'';
+  $('rows').innerHTML=(s.recent||[]).map(function(r){
    return '<tr><td class="n">'+fmt(r.time)+'</td><td>'+esc(r.channel)+'</td><td>'+esc(r.title)+
     '</td><td class="'+(r.words?'flag':'')+'">'+(r.words||0)+'</td><td class="n">'+(r.seconds||0)+
     's</td><td class="'+esc(r.status)+'">'+esc(r.status)+(r.note?(' \\u2014 '+esc(r.note)):'')+'</td></tr>';
   }).join('');
-  document.getElementById('empty').style.display=(s.recent&&s.recent.length)?'none':'block';
+  $('empty').style.display=(s.recent&&s.recent.length)?'none':'block';
  }).catch(function(){});
 }
-tick();setInterval(tick,5000);
+loadConfig();tick();setInterval(tick,5000);
 </script></body></html>
 """
 
@@ -404,6 +586,9 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _json(self, code, obj):
+        self._send(code, 'application/json', json.dumps(obj).encode())
+
     def do_GET(self):  # noqa: N802
         p = urlparse(self.path).path
         if p == '/status':
@@ -414,8 +599,43 @@ class Handler(BaseHTTPRequestHandler):
                     'recent': STATE['recent'][:100],
                 }).encode()
             return self._send(200, 'application/json', body)
+        if p == '/config':
+            try:
+                cfg = load_config()
+            except Exception as e:  # noqa: BLE001
+                return self._json(500, {'error': 'could not read config: %s' % e})
+            settings = dict(DEFAULT_SETTINGS)
+            settings.update({k: v for k, v in cfg['settings'].items() if v is not None})
+            return self._json(200, {'settings': settings, 'channels': cfg['channels']})
         if p in ('/', '/index.html'):
             return self._send(200, 'text/html; charset=utf-8', DASH_HTML.encode())
+        return self._send(404, 'application/json', b'{"error":"not found"}')
+
+    def do_POST(self):  # noqa: N802
+        p = urlparse(self.path).path
+        if p == '/config':
+            try:
+                n = int(self.headers.get('Content-Length') or 0)
+                if not 0 < n <= 1_000_000:
+                    raise ValueError('bad request size')
+                cfg = clean_config(json.loads(self.rfile.read(n).decode('utf-8')))
+            except (ValueError, UnicodeDecodeError) as e:
+                return self._json(400, {'error': str(e)})
+            try:
+                save_config(cfg)
+            except OSError as e:
+                return self._json(500, {'error': 'could not write config: %s' % e})
+            with STATE_LOCK:
+                STATE['channels'] = [
+                    {'name': c['name'], 'url': c['url'],
+                     'from': c.get('from', ''), 'to': c.get('to', '')}
+                    for c in cfg['channels']]
+            log('config saved from dashboard —',
+                len(cfg['channels']), 'channel(s)')
+            return self._json(200, {'ok': True})
+        if p == '/check':
+            WAKE.set()
+            return self._json(200, {'ok': True})
         return self._send(404, 'application/json', b'{"error":"not found"}')
 
     def log_message(self, *args):
@@ -424,6 +644,7 @@ class Handler(BaseHTTPRequestHandler):
 
 def main():
     ensure_dirs()
+    ensure_config()
     load_state()
     threading.Thread(
         target=lambda: ThreadingHTTPServer(('0.0.0.0', PORT), Handler).serve_forever(),
@@ -431,11 +652,12 @@ def main():
     log('dashboard on http://0.0.0.0:%d' % PORT)
 
     while True:
+        WAKE.clear()
         try:
             cfg = load_config()
         except Exception as e:  # noqa: BLE001
-            log('config error (fix %s):' % CONFIG_PATH, e)
-            time.sleep(60)
+            log('config error (fix %s or resave from the dashboard):' % CONFIG_PATH, e)
+            WAKE.wait(60)
             continue
         with STATE_LOCK:
             STATE['channels'] = [
@@ -453,7 +675,8 @@ def main():
             STATE['next_check'] = datetime.fromtimestamp(
                 time.time() + interval * 60, timezone.utc).isoformat()
         log('done — next check in %d min' % interval)
-        time.sleep(interval * 60)
+        if WAKE.wait(interval * 60):
+            log('check requested from dashboard')
 
 
 if __name__ == '__main__':

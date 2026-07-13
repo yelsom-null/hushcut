@@ -1,3 +1,5 @@
+# Optional starting point — everything here can also be managed from the
+# dashboard (http://localhost:8788), which creates and rewrites config.yaml.
 settings:
   check_interval_minutes: 360    # how often to check channels (minutes)
   keep_original: false           # keep unmuted originals in data/originals
