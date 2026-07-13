@@ -71,14 +71,3 @@ Config is re-read every cycle — edit it any time without restarting.
 - Be polite: long check intervals (6–24 h) keep YouTube from throttling you.
 - The Dockerfile installs `deno` for yt-dlp's YouTube extractor (x86_64 build —
   swap the download URL for `aarch64` on ARM/Raspberry Pi).
-
-## Pushing this to GitHub
-
-```bash
-git init
-git add .
-git commit -m "Hushcut: scheduled channel downloads with profanity muting"
-git branch -M main
-git remote add origin https://github.com/yelsom-null/hushcut.git
-git push -u origin main
-```
