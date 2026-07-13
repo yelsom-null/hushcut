@@ -52,8 +52,14 @@ INLINE_RE = re.compile(r'<(\d{1,2}):(\d{2}):(\d{2})[.,](\d{1,3})>')
 STATE_LOCK = threading.Lock()
 STATE = {
     'recent': [], 'channels': [], 'next_check': None, 'busy': False,
+    'current': None,  # human-readable "what is happening right now"
     'started': datetime.now(timezone.utc).isoformat(),
 }
+
+# activity log shown on the dashboard; separate lock so log() can be called
+# from code that already holds STATE_LOCK (e.g. save_state failures)
+ACT_LOCK = threading.Lock()
+ACTIVITY = []
 
 CONFIG_LOCK = threading.Lock()
 WAKE = threading.Event()  # set by POST /check (and after config save) to skip the sleep
@@ -71,7 +77,16 @@ DEFAULT_SETTINGS = {
 
 
 def log(*args):
-    print('[hushcut]', *args, flush=True)
+    msg = ' '.join(str(a) for a in args)
+    print('[hushcut]', msg, flush=True)
+    with ACT_LOCK:
+        ACTIVITY.insert(0, {'t': datetime.now(timezone.utc).isoformat(), 'm': msg})
+        del ACTIVITY[300:]
+
+
+def set_current(text):
+    with STATE_LOCK:
+        STATE['current'] = text
 
 
 def ensure_dirs():
@@ -322,14 +337,45 @@ def sync_channel(ch, cfg):
     if to:
         cmd += ['--datebefore', to]
     cmd.append(str(ch['url']))
-    log('sync:', name, 'window:', frm or '-', '→', to or '-')
+    log('sync: %s (window %s → %s)' % (name, frm or 'any', to or 'any'))
+    set_current('%s — checking for new videos' % name)
+    seen, cur_title = set(), None
     try:
-        p = subprocess.run(cmd, capture_output=True, text=True, timeout=3 * 3600)
-        tail_lines = [l for l in (p.stdout or '').splitlines() if l.strip()][-3:]
-        for l in tail_lines:
-            log('  ', l)
+        p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                             text=True, errors='replace')
+        watchdog = threading.Timer(3 * 3600, p.kill)
+        watchdog.start()
+        try:
+            for line in p.stdout:
+                line = line.strip()
+                m = re.search(r'\[download\] Destination: (.+)', line)
+                if m:
+                    base = os.path.basename(m.group(1))
+                    if base.lower().endswith(('.vtt', '.srt')):
+                        continue
+                    cur_title = re.sub(r'(\.f\d+)?\.\w+$', '', base)
+                    if cur_title not in seen:
+                        seen.add(cur_title)
+                        log('downloading:', cur_title)
+                    set_current('%s — downloading %s' % (name, cur_title))
+                elif line.startswith('[download]') and '%' in line and cur_title:
+                    pm = re.search(r'(\d+(?:\.\d+)?%)(?:.*?ETA\s+(\S+))?', line)
+                    if pm:
+                        prog = pm.group(1) + (', ETA ' + pm.group(2) if pm.group(2) else '')
+                        set_current('%s — downloading %s (%s)' % (name, cur_title, prog))
+                elif '[download] Downloading item' in line:
+                    set_current('%s — %s' % (name, line.replace('[download] ', '')))
+                elif line.startswith('ERROR'):
+                    log('  ', line[:200])
+            p.wait(timeout=300)
+        finally:
+            watchdog.cancel()
+        log('sync done: %s — %s' % (
+            name, '%d new video(s)' % len(seen) if seen else 'nothing new'))
     except Exception as e:  # noqa: BLE001
         log('sync error:', name, e)
+    finally:
+        set_current(None)
 
 
 def find_subs(root, base):
@@ -359,6 +405,7 @@ def process_incoming(cfg):
             dst = os.path.join(dstdir, base + ' (clean).mp4')
             if os.path.exists(dst):
                 continue
+            set_current('muting: %s' % base)
             subs = find_subs(root, base)
             entry = {'time': datetime.now(timezone.utc).isoformat(), 'channel': channel,
                      'title': base, 'words': 0, 'seconds': 0.0, 'status': 'ok', 'note': ''}
@@ -463,12 +510,19 @@ label.chk input{width:auto}
 .saverow{display:flex;align-items:center;gap:12px}
 #msg{font-size:12.5px;font-weight:600}
 #msg.good{color:#2f9e44}#msg.bad{color:#b3261e}
+.curline{font-size:13px;font-weight:600;margin-bottom:10px}
+.curline.idle{color:#6e6e73;font-weight:500}
+.logbox{max-height:240px;overflow-y:auto;background:#f6f5f3;border:1px solid rgba(0,0,0,.07);border-radius:7px;padding:8px 10px;font-family:ui-monospace,Menlo,monospace;font-size:11.5px;line-height:1.7;word-break:break-word}
+.logbox .lt{color:#a1a09d;margin-right:8px;white-space:nowrap}
 @media(max-width:700px){.chrow{grid-template-columns:1fr 1fr}}
 </style></head><body>
 <div class="bar"><div class="glyph">H</div><h1>Hushcut Server</h1>
 <span id="busy" class="pill">idle</span><span style="flex:1"></span><span id="next" class="n"></span>
 <button id="checknow" class="btn ghost" type="button" style="height:30px;padding:0 12px">Check now</button></div>
 <div class="wrap">
+<div class="card"><h2>Activity</h2>
+<div id="cur" class="curline idle">Loading&hellip;</div>
+<div id="log" class="logbox empty">No activity yet.</div></div>
 <div class="card"><h2>Channels</h2>
 <div id="chrows" class="empty">Loading&hellip;</div>
 <button id="addch" class="btn ghost" type="button">+ Add channel</button></div>
@@ -492,6 +546,7 @@ label.chk input{width:auto}
 <script>
 function esc(s){return String(s==null?'':s).replace(/[&<>"]/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]})}
 function fmt(iso){if(!iso)return'';return new Date(iso).toLocaleString()}
+function tfmt(iso){if(!iso)return'';return new Date(iso).toLocaleTimeString()}
 function $(id){return document.getElementById(id)}
 function msg(text,good){var m=$('msg');m.textContent=text;m.className=good?'good':'bad';
  clearTimeout(msg._t);if(text)msg._t=setTimeout(function(){m.textContent=''},6000)}
@@ -565,6 +620,15 @@ function tick(){
   busy.textContent=s.busy?'checking\\u2026':'idle';
   busy.className='pill'+(s.busy?' busy':'');
   $('next').textContent=s.next_check?('next check '+fmt(s.next_check)):'';
+  var cur=$('cur');
+  if(s.current){cur.textContent=s.current;cur.className='curline'}
+  else{cur.textContent=s.busy?'checking channels\\u2026':'idle \\u2014 waiting for the next check';cur.className='curline idle'}
+  if(s.activity&&s.activity.length){
+   var lg=$('log');lg.className='logbox';
+   lg.innerHTML=s.activity.map(function(a){
+    return '<div><span class="lt">'+esc(tfmt(a.t))+'</span>'+esc(a.m)+'</div>';
+   }).join('');
+  }
   $('rows').innerHTML=(s.recent||[]).map(function(r){
    return '<tr><td class="n">'+fmt(r.time)+'</td><td>'+esc(r.channel)+'</td><td>'+esc(r.title)+
     '</td><td class="'+(r.words?'flag':'')+'">'+(r.words||0)+'</td><td class="n">'+(r.seconds||0)+
@@ -592,10 +656,13 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):  # noqa: N802
         p = urlparse(self.path).path
         if p == '/status':
+            with ACT_LOCK:
+                activity = ACTIVITY[:100]
             with STATE_LOCK:
                 body = json.dumps({
                     'busy': STATE['busy'], 'next_check': STATE['next_check'],
                     'started': STATE['started'], 'channels': STATE['channels'],
+                    'current': STATE['current'], 'activity': activity,
                     'recent': STATE['recent'][:100],
                 }).encode()
             return self._send(200, 'application/json', body)
@@ -669,6 +736,7 @@ def main():
             if ch.get('url'):
                 sync_channel(ch, cfg)
         process_incoming(cfg)
+        set_current(None)
         interval = max(5, int(cfg['settings'].get('check_interval_minutes', 360)))
         with STATE_LOCK:
             STATE['busy'] = False

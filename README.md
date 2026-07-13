@@ -31,6 +31,25 @@ A default `config/config.yaml` is created on first run. Prefer editing YAML by
 hand? Copy `config/config.example.yaml` to `config/config.yaml` instead — the
 dashboard and the file stay in sync (saving from the GUI rewrites the file).
 
+The dashboard's **Activity** card shows what's happening live: which channel is
+being checked, per-video download progress (percent + ETA from yt-dlp), muting
+progress, and a running log of everything the server does.
+
+## Updating
+
+```bash
+./tools/update.sh
+```
+
+That pulls the latest commit and applies it: server code is bind-mounted into
+the container, so normal updates are just a container restart; the image is
+rebuilt automatically when `Dockerfile`/`docker-compose.yml` changed. For
+hands-off updates, run it from cron:
+
+```cron
+0 4 * * * cd /path/to/hushcut && ./tools/update.sh >> data/update.log 2>&1
+```
+
 ## Configuration (`config/config.yaml`)
 
 Everything below can be set from the dashboard; the YAML is the source of truth.
@@ -66,6 +85,7 @@ immediately.
 - `server/main.py` — the scheduler + downloader + muting pipeline + dashboard
 - `docker-compose.yml`, `Dockerfile` — container setup (ffmpeg, yt-dlp, deno included)
 - `config/config.example.yaml` — starter config
+- `tools/update.sh` — pull the latest commit and restart/rebuild the container
 - `tools/hushcut-helper.py` — local helper for the interactive Hushcut review app
   (paste a URL in the app, preview mutes word-by-word, export a muted copy)
 
