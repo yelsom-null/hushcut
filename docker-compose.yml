@@ -10,3 +10,16 @@ services:
       - ./data:/data
     environment:
       - TZ=America/New_York
+      # PO token provider (helps with YouTube's bot checks); remove this line
+      # and the bgutil-provider service below to run without it
+      - HUSHCUT_POT_URL=http://bgutil-provider:4416
+    depends_on:
+      - bgutil-provider
+
+  # generates YouTube "proof of origin" tokens for yt-dlp — makes traffic look
+  # legitimate without needing account cookies (cookies.txt still supported too)
+  bgutil-provider:
+    image: brainicism/bgutil-ytdlp-pot-provider
+    container_name: bgutil-provider
+    restart: unless-stopped
+    init: true

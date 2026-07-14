@@ -37,11 +37,27 @@ progress, and a running log of everything the server does. While a check is
 running, the **Check now** button becomes **Stop** — it kills the current
 download/mute and ends the check; anything unfinished is retried next cycle.
 
-## YouTube bot checks (cookies)
+## YouTube bot checks
 
 If the Activity log shows `Sign in to confirm you're not a bot`, YouTube is
-blocking anonymous downloads from your IP. Fix: give yt-dlp cookies from a
-signed-in YouTube session.
+suspicious of your IP. Hushcut ships two defenses; they stack.
+
+### 1. PO token provider (on by default, no account needed)
+
+`docker-compose.yml` runs a companion container, `bgutil-provider`
+([bgutil-ytdlp-pot-provider](https://github.com/Brainicism/bgutil-ytdlp-pot-provider)),
+that generates the "proof of origin" tokens YouTube expects from legitimate
+clients, and yt-dlp is pointed at it automatically (the `HUSHCUT_POT_URL` env
+var). Nothing to configure — `docker compose up -d --build` starts both. Sync
+lines in the Activity log show `[pot]` when it's active. Note the upstream
+project's caveat: tokens make traffic look more legitimate but don't guarantee
+bypassing every check. To opt out, remove the `bgutil-provider` service and the
+`HUSHCUT_POT_URL` line from `docker-compose.yml`.
+
+### 2. Cookies from a signed-in session (fallback)
+
+If the bot check persists, give yt-dlp cookies from a signed-in YouTube
+session.
 
 1. In a browser signed in to YouTube (a throwaway Google account is strongly
    recommended — heavy downloading can get an account flagged), install a

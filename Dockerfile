@@ -11,7 +11,9 @@ RUN curl -fsSL https://github.com/denoland/deno/releases/latest/download/deno-x8
     && rm /tmp/deno.zip \
     && chmod +x /usr/local/bin/deno
 
-RUN pip install --no-cache-dir --upgrade yt-dlp pyyaml
+# bgutil-ytdlp-pot-provider is the yt-dlp plugin side of the PO token
+# provider (see the bgutil-provider service in docker-compose.yml)
+RUN pip install --no-cache-dir --upgrade yt-dlp pyyaml bgutil-ytdlp-pot-provider
 
 WORKDIR /app
 COPY server/main.py /app/main.py

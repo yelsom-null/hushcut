@@ -34,6 +34,9 @@ except ImportError:
 CONFIG_PATH = os.environ.get('HUSHCUT_CONFIG', '/config/config.yaml')
 DATA = os.environ.get('HUSHCUT_DATA', '/data')
 PORT = int(os.environ.get('HUSHCUT_PORT', '8788'))
+# base URL of a bgutil PO token provider server (set by docker-compose);
+# empty = don't use one
+POT_URL = os.environ.get('HUSHCUT_POT_URL', '').strip()
 
 VIDEO_EXTS = ('.mp4', '.mkv', '.webm', '.m4v', '.mov')
 
@@ -365,14 +368,17 @@ def sync_channel(ch, cfg):
     cookies = cookies_path()
     if cookies:
         cmd += ['--cookies', cookies]
+    if POT_URL:
+        cmd += ['--extractor-args', 'youtubepot-bgutilhttp:base_url=' + POT_URL]
     if frm:
         cmd += ['--dateafter', frm,
                 '--break-match-filters', 'upload_date >= %s' % frm]
     if to:
         cmd += ['--datebefore', to]
     cmd.append(str(ch['url']))
-    log('sync: %s (window %s → %s)%s' % (
-        name, frm or 'any', to or 'any', ' [cookies]' if cookies else ''))
+    log('sync: %s (window %s → %s)%s%s' % (
+        name, frm or 'any', to or 'any',
+        ' [cookies]' if cookies else '', ' [pot]' if POT_URL else ''))
     set_current('%s — checking for new videos' % name)
     seen, cur_title, hinted = set(), None, False
     try:
